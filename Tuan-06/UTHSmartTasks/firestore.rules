@@ -1,0 +1,28 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // users/{uid}/tasks/{taskId}: task fields and a list of subtasks.
+    function ownsTasks(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function validTask(data) {
+      let fields = ['title', 'note', 'category', 'date', 'time', 'priority', 'remind', 'done', 'subtasks'];
+      return data.keys().hasAll(fields) && data.keys().hasOnly(fields)
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 250
+        && data.note is string && data.note.size() <= 10000
+        && data.category in ['study', 'life']
+        && data.date is string && data.date.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}')
+        && data.time is string && data.time.matches('([01][0-9]|2[0-3]):[0-5][0-9]')
+        && data.priority in ['low', 'medium', 'high']
+        && data.remind is bool && data.done is bool
+        && data.subtasks is list && data.subtasks.size() <= 200;
+    }
+
+    match /users/{uid}/tasks/{taskId} {
+      allow read, delete: if ownsTasks(uid);
+      allow create, update: if ownsTasks(uid) && taskId.matches('[1-9][0-9]{0,9}')
+        && int(taskId) <= 2147483647 && validTask(request.resource.data);
+    }
+  }
+}

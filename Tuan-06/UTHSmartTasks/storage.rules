@@ -1,0 +1,15 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /users/{uid}/avatar.jpg {
+      function isOwner() {
+        return request.auth != null && request.auth.uid == uid;
+      }
+      allow get: if isOwner();
+      allow create, update: if isOwner()
+        && request.resource.size > 0
+        && request.resource.size <= 1024 * 1024
+        && request.resource.contentType == 'image/jpeg';
+    }
+  }
+}
