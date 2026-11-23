@@ -12,3 +12,4 @@ Kho lưu trữ các bài tập và sản phẩm thực hành trong quá trình h
 | Tuần 04 | Navigation Compose và Lập trình Hướng đối tượng (OOP) | [Xem bài Tuần 04](./Tuan-04/) |
 | Tuần 05 | Firebase Authentication, Realtime Database, Analytics và Remote Config | [Xem bài Tuần 05](./Tuan-05/) |
 | Tuần 06 | REST API, UTH SmartTasks, quyền Android và dữ liệu thị trường crypto | [Xem bài Tuần 06](./Tuan-06/) |
+| Tuần 07 | MVVM trong UTH SmartTasks và thực hành viết skill | [Xem bài Tuần 07](./Tuan-07/) |
