@@ -2,6 +2,7 @@ package com.example.uthsmarttasks
 
 import android.app.Application
 import android.graphics.Bitmap
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.collectAsState
@@ -190,6 +191,54 @@ class TaskApiFlowTest {
         } finally {
             prefs.edit().putStringSet("read", oldRead).commit()
             com.example.uthsmarttasks.notifications.TaskReminder.cancel(context, 98765)
+            server.shutdown()
+        }
+    }
+
+    @Test fun notificationDemoShowsEmptyViewAfterTenSeconds() {
+        val context = ui.activity.application
+        val testApp = FirebaseApp.initializeApp(context, FirebaseApp.getInstance().options, "notificationsDemo")
+        val server = MockWebServer()
+        server.start()
+        try {
+            server.enqueue(MockResponse().setBody("[]"))
+            val repository = TaskRepository(ApiClient.create(server.url("/").toString()))
+            val auth = AuthViewModel(AuthRepository(FirebaseAuth.getInstance(testApp)))
+            ui.runOnUiThread { vm = TaskViewModel(context, repository, false) }
+            ui.setContent {
+                MaterialTheme(colorScheme = todoColors(false), typography = AppTypography) { TodoApp(vm, auth) }
+            }
+            ui.waitUntil(10_000) { ui.onAllNodesWithText("Bỏ qua").fetchSemanticsNodes().isNotEmpty() }
+            ui.onNodeWithText("Bỏ qua").performClick()
+            ui.onNodeWithText("Dùng thử không cần tài khoản").performScrollTo().performClick()
+            waitLoaded()
+            ui.onNodeWithText("Cài đặt").performClick()
+            val demo = ui.onNodeWithText("Demo thông báo MVVM").performScrollTo()
+            val openedAt = SystemClock.elapsedRealtime()
+            demo.performClick()
+            ui.onNodeWithText("Sắp đến hạn").assertIsDisplayed()
+            ui.onNodeWithText("Đã quá hạn").assertIsDisplayed()
+            ui.onNodeWithText("Làm tốt lắm!").assertIsDisplayed()
+            ui.onNodeWithText("Nhắc việc", substring = false).assertIsDisplayed()
+            screenshot("mvvm-notifications-list")
+            ui.onNodeWithText("Đánh dấu đã đọc").performClick()
+            ui.onAllNodesWithContentDescription("Chưa đọc", useUnmergedTree = true).assertCountEquals(0)
+
+            val emptyTitle = "Chưa có thông báo nào"
+            ui.waitUntil(12_000) { ui.onAllNodesWithText(emptyTitle).fetchSemanticsNodes().isNotEmpty() }
+            assertTrue(SystemClock.elapsedRealtime() - openedAt >= 9_900)
+            ui.onNodeWithText(emptyTitle).assertIsDisplayed()
+            ui.onNodeWithText("Thêm việc cần làm").assertIsDisplayed()
+            ui.onNodeWithText("Cài đặt nhắc việc").assertIsDisplayed()
+            screenshot("mvvm-notifications-empty")
+            ui.onNodeWithText("Chạy lại demo").performClick()
+            ui.onNodeWithText("Sắp đến hạn").assertIsDisplayed()
+            ui.onAllNodesWithText("Thông báo").filter(hasClickAction()).onFirst().performClick()
+            ui.onNodeWithText(emptyTitle).assertIsDisplayed()
+            ui.onNodeWithText("Chạy lại demo").assertDoesNotExist()
+            assertEquals(1, server.requestCount)
+        } finally {
+            testApp.delete()
             server.shutdown()
         }
     }

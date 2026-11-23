@@ -73,6 +73,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.uthsmarttasks.R
 import com.example.uthsmarttasks.BuildConfig
 import com.example.uthsmarttasks.auth.repository.AvatarStorage
@@ -82,6 +83,9 @@ import com.example.uthsmarttasks.model.CreateTaskRequest
 import com.example.uthsmarttasks.model.tasksForToday
 import com.example.uthsmarttasks.viewmodel.TaskViewModel
 import com.example.uthsmarttasks.viewmodel.TaskUiState
+import com.example.uthsmarttasks.viewmodel.NotificationItem
+import com.example.uthsmarttasks.viewmodel.NotificationKind
+import com.example.uthsmarttasks.viewmodel.NotificationViewModel
 import com.example.uthsmarttasks.auth.model.AuthUiState
 import com.example.uthsmarttasks.auth.ui.AuthViewModel
 import com.example.uthsmarttasks.ui.theme.TodoAccents
@@ -111,7 +115,7 @@ private fun topAfterStatusBar(target: Dp): Dp = with(LocalDensity.current) {
     (target - WindowInsets.statusBars.getTop(this).toDp()).coerceAtLeast(0.dp)
 }
 
-private enum class Page { START, HOME, LIST, ADD, EDIT, DETAIL, SETTINGS, PROFILE, NOTIFICATIONS, ONBOARDING, LOGIN }
+private enum class Page { START, HOME, LIST, ADD, EDIT, DETAIL, SETTINGS, PROFILE, NOTIFICATIONS, NOTIFICATION_DEMO, ONBOARDING, LOGIN }
 
 @Composable
 fun TodoApp(
@@ -120,6 +124,7 @@ fun TodoApp(
     requestNotificationPermissionOnHome: Boolean = false
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val notificationDemo: NotificationViewModel = viewModel()
     val authState by authViewModel.uiState.collectAsStateWithLifecycle()
     val profileError by authViewModel.profileError.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -163,6 +168,7 @@ fun TodoApp(
             Page.EDIT -> Page.DETAIL.name
             Page.PROFILE -> Page.SETTINGS.name
             Page.NOTIFICATIONS -> notificationsReturn
+            Page.NOTIFICATION_DEMO -> Page.SETTINGS.name
             Page.LOGIN -> Page.ONBOARDING.name
             Page.ONBOARDING -> Page.LOGIN.name
             else -> Page.HOME.name
@@ -219,7 +225,8 @@ fun TodoApp(
         contentWindowInsets = WindowInsets.safeDrawing,
         containerColor = screenStatusBarColor,
         bottomBar = {
-            if (page == Page.HOME.name || page == Page.LIST.name || page == Page.SETTINGS.name || page == Page.NOTIFICATIONS.name) {
+            val showingNotifications = page == Page.NOTIFICATIONS.name || page == Page.NOTIFICATION_DEMO.name
+            if (page == Page.HOME.name || page == Page.LIST.name || page == Page.SETTINGS.name || showingNotifications) {
                 Box(Modifier.background(MaterialTheme.colorScheme.surface)) {
                     HorizontalDivider(color = if (isDark) SurfaceGray else Color(0xFFE5E5EA))
                     Row(Modifier.fillMaxWidth().navigationBarsPadding().height(62.dp).padding(start = 8.dp, end = 8.dp, top = 6.dp), verticalAlignment = Alignment.Top) {
@@ -230,7 +237,7 @@ fun TodoApp(
                                 Icon(painterResource(R.drawable.ic_figma_add), "Thêm mới", modifier = Modifier.size(26.dp))
                             }
                         }
-                        BottomNavItem("Thông báo", R.drawable.ic_figma_notifications, page == Page.NOTIFICATIONS.name, { go(Page.NOTIFICATIONS) })
+                        BottomNavItem("Thông báo", R.drawable.ic_figma_notifications, showingNotifications, { go(Page.NOTIFICATIONS) })
                         BottomNavItem("Cài đặt", R.drawable.ic_figma_settings, page == Page.SETTINGS.name, { go(Page.SETTINGS) })
                     }
                 }
@@ -271,6 +278,7 @@ fun TodoApp(
                         Page.HOME -> "Trang chủ"
                         Page.SETTINGS -> "Cài đặt"
                         Page.NOTIFICATIONS -> "Thông báo"
+                        Page.NOTIFICATION_DEMO -> "Thông báo"
                         else -> "Danh sách"
                     },
                     onBack = { page = detailReturn },
@@ -292,6 +300,10 @@ fun TodoApp(
                     onSound = viewModel::setNotificationSound,
                     onDailySummary = viewModel::setDailySummary,
                     onNotifications = { go(Page.NOTIFICATIONS) },
+                    onNotificationDemo = {
+                        notificationDemo.startDemo()
+                        go(Page.NOTIFICATION_DEMO)
+                    },
                     onRequestNotifications = {
                         if (needsNotificationPermission()) requestNotificationPermission()
                         else TaskReminder.restore(context)
@@ -328,10 +340,26 @@ fun TodoApp(
                     onSync = viewModel::loadTasks,
                     onSignOut = { guestMode = false; authViewModel.signOut(context); go(Page.LOGIN) }
                 )
-                Page.NOTIFICATIONS -> NotificationsScreen(state.tasks, readNotificationKeys, onMarkRead = { keys ->
-                    readNotificationKeys = readNotificationKeys + keys
-                    notificationPrefs.edit().putStringSet(notificationReadKey, readNotificationKeys).apply()
-                })
+                Page.NOTIFICATIONS -> NotificationsScreen(
+                    items = taskNotifications(state.tasks, readNotificationKeys),
+                    onMarkRead = { keys ->
+                        readNotificationKeys = readNotificationKeys + keys
+                        notificationPrefs.edit().putStringSet(notificationReadKey, readNotificationKeys).apply()
+                    },
+                    onAddTask = { go(Page.ADD) },
+                    onReminderSettings = { go(Page.SETTINGS) }
+                )
+                Page.NOTIFICATION_DEMO -> {
+                    val items by notificationDemo.notifications.collectAsStateWithLifecycle()
+                    LaunchedEffect(notificationDemo) { notificationDemo.startDemoIfNeeded() }
+                    NotificationsScreen(
+                        items = items,
+                        onMarkRead = notificationDemo::markRead,
+                        onAddTask = { go(Page.ADD) },
+                        onReminderSettings = { go(Page.SETTINGS) },
+                        onReplay = notificationDemo::startDemo
+                    )
+                }
                 Page.START -> StartScreen(onContinue = { go(Page.ONBOARDING) })
                 Page.ONBOARDING -> OnboardingScreen(onContinue = { go(if (authState is AuthUiState.Success) Page.HOME else Page.LOGIN) }, onSkip = { go(if (authState is AuthUiState.Success) Page.HOME else Page.LOGIN) })
                 Page.LOGIN -> LoginScreen(
@@ -940,6 +968,7 @@ private fun SettingsScreen(
     onSound: (Boolean) -> Unit,
     onDailySummary: (Boolean) -> Unit,
     onNotifications: () -> Unit,
+    onNotificationDemo: () -> Unit,
     onRequestNotifications: () -> Unit,
     onNotificationSettings: () -> Unit,
     onExactAlarmSettings: (() -> Unit)?,
@@ -1012,6 +1041,8 @@ private fun SettingsScreen(
                     if (enabled) onRequestNotifications()
                     onDailySummary(enabled)
                 }
+                HorizontalDivider(color = RowDivider)
+                SettingRow("Demo thông báo MVVM", "Hiển thị thông báo mẫu trong 10 giây", onClick = onNotificationDemo)
             }
         }
 
@@ -1417,22 +1448,49 @@ private fun notificationKey(task: Task, now: String): String {
     return if (category == "Sắp đến hạn") base else "$base:$category"
 }
 
-@Composable
-private fun NotificationsScreen(tasks: List<Task>, readKeys: Set<String>, onMarkRead: (Set<String>) -> Unit) {
+private fun taskNotifications(tasks: List<Task>, readKeys: Set<String>): List<NotificationItem> {
     val now = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
-    val reminders = tasks.filter { it.date.isNotBlank() && (it.done || it.remind || "${it.date} ${it.time}" < now) }
+    return tasks.filter { it.date.isNotBlank() && (it.done || it.remind || "${it.date} ${it.time}" < now) }
         .sortedWith(compareBy<Task> { it.date }.thenBy { it.time })
+        .map { task ->
+            val key = notificationKey(task, now)
+            val category = notificationCategory(task, now)
+            val kind = when (category) {
+                "Đã quá hạn" -> NotificationKind.OVERDUE
+                "Đã hoàn thành" -> NotificationKind.COMPLETED
+                else -> NotificationKind.REMINDER
+            }
+            val summary = when (kind) {
+                NotificationKind.OVERDUE -> "${task.title} chưa xong."
+                NotificationKind.COMPLETED -> "Bạn đã hoàn thành ${task.title}."
+                NotificationKind.REMINDER -> "${task.title} lúc ${task.time}."
+            }
+            val dateLabel = formatTaskDate(task.date)
+            NotificationItem(
+                key, kind, if (task.done) "Làm tốt lắm!" else category,
+                summary, if (dateLabel == "Hôm nay") task.time else dateLabel, unread = key !in readKeys
+            )
+        }
+}
+
+@Composable
+private fun NotificationsScreen(
+    items: List<NotificationItem>,
+    onMarkRead: (Set<String>) -> Unit,
+    onAddTask: () -> Unit,
+    onReminderSettings: () -> Unit,
+    onReplay: (() -> Unit)? = null
+) {
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState())
-            .padding(start = 20.dp, end = 20.dp, top = topAfterStatusBar(60.dp), bottom = 24.dp),
+        Modifier.fillMaxSize().padding(start = 20.dp, end = 20.dp, top = topAfterStatusBar(60.dp), bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Row(Modifier.fillMaxWidth().heightIn(min = 42.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Thông báo", Modifier.weight(1f), color = Ink, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            if (reminders.isNotEmpty()) {
+            if (items.isNotEmpty()) {
                 Box(
                     Modifier.heightIn(min = 42.dp).clickable(role = Role.Button) {
-                        onMarkRead(reminders.map { notificationKey(it, now) }.toSet())
+                        onMarkRead(items.map { it.key }.toSet())
                     },
                     contentAlignment = Alignment.Center
                 ) {
@@ -1440,15 +1498,18 @@ private fun NotificationsScreen(tasks: List<Task>, readKeys: Set<String>, onMark
                 }
             }
         }
-        if (reminders.isEmpty()) {
-            Text("Chưa có thông báo nào.", color = Muted, fontSize = 14.sp)
+        if (items.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                EmptyNotifications(onAddTask, onReminderSettings, onReplay)
+            }
         } else {
-            Surface(color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(18.dp)) {
-                Column(Modifier.fillMaxWidth()) {
-                    reminders.forEachIndexed { index, task ->
-                        val key = notificationKey(task, now)
-                        NotificationRow(task, notificationCategory(task, now), unread = key !in readKeys) { onMarkRead(setOf(key)) }
-                        if (index != reminders.lastIndex) HorizontalDivider(color = RowDivider)
+            Box(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                Surface(color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(18.dp)) {
+                    Column(Modifier.fillMaxWidth()) {
+                        items.forEachIndexed { index, item ->
+                            NotificationRow(item) { onMarkRead(setOf(item.key)) }
+                            if (index != items.lastIndex) HorizontalDivider(color = RowDivider)
+                        }
                     }
                 }
             }
@@ -1457,22 +1518,56 @@ private fun NotificationsScreen(tasks: List<Task>, readKeys: Set<String>, onMark
 }
 
 @Composable
-private fun NotificationRow(task: Task, category: String, unread: Boolean, onClick: () -> Unit) {
-    val dark = MaterialTheme.colorScheme.background == Color.Black
-    val (icon, iconBackground, iconTint) = when (category) {
-        "Đã quá hạn" -> Triple(R.drawable.ic_tryapps_overdue, if (dark) Color(0xFF42201D) else Color(0xFFFDE7E7), if (dark) Color(0xFFFFA79C) else Color(0xFFB42318))
-        "Đã hoàn thành" -> Triple(R.drawable.ic_tryapps_completed, if (dark) Color(0xFF17382D) else Color(0xFFDDF5EA), if (dark) Color(0xFF8FE0B9) else Color(0xFF0F7A4F))
-        else -> Triple(R.drawable.ic_tryapps_alarm, PaleBlue, if (dark) Color(0xFF9DB5FF) else Color(0xFF1F4FD1))
+private fun EmptyNotifications(onAddTask: () -> Unit, onReminderSettings: () -> Unit, onReplay: (() -> Unit)?) {
+    Column(
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(Modifier.size(124.dp).background(PaleBlue, CircleShape), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(84.dp).background(MaterialTheme.colorScheme.surface, CircleShape), contentAlignment = Alignment.Center) {
+                Icon(painterResource(R.drawable.ic_figma_notifications), null, tint = LinkBlue, modifier = Modifier.size(36.dp))
+            }
+            Box(
+                Modifier.align(Alignment.BottomEnd).offset(x = (-12).dp, y = (-13).dp)
+                    .size(36.dp).background(Color(0xFF2D8A53), CircleShape)
+                    .border(2.dp, MaterialTheme.colorScheme.surface, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(painterResource(R.drawable.ic_tryapps_completed), null, tint = Color.White, modifier = Modifier.size(19.dp))
+            }
+        }
+        Spacer(Modifier.height(24.dp))
+        Text("Chưa có thông báo nào", color = Ink, fontSize = 20.sp, fontWeight = FontWeight.Bold,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+        Spacer(Modifier.height(10.dp))
+        Text("Khi có việc sắp đến hạn, quá hạn hoặc lời nhắc, bạn sẽ thấy chúng ở đây.",
+            color = Muted, fontSize = 15.sp, lineHeight = 22.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+        Spacer(Modifier.height(24.dp))
+        Button(onClick = onAddTask, modifier = Modifier.heightIn(min = 48.dp), shape = RoundedCornerShape(14.dp)) {
+            Icon(painterResource(R.drawable.ic_figma_add), null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Thêm việc cần làm", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        }
+        TextButton(onClick = onReminderSettings) {
+            Text("Cài đặt nhắc việc", color = LinkBlue, fontWeight = FontWeight.SemiBold)
+        }
+        if (onReplay != null) {
+            TextButton(onClick = onReplay) { Text("Chạy lại demo", color = LinkBlue) }
+        }
     }
-    val title = if (task.done) "Làm tốt lắm!" else category
-    val summary = when (category) {
-        "Đã quá hạn" -> "${task.title} chưa xong."
-        "Đã hoàn thành" -> "Bạn đã hoàn thành ${task.title}."
-        else -> "${task.title} lúc ${task.time}."
+}
+
+@Composable
+private fun NotificationRow(item: NotificationItem, onClick: () -> Unit) {
+    val dark = MaterialTheme.colorScheme.background == Color.Black
+    val (icon, iconBackground, iconTint) = when (item.kind) {
+        NotificationKind.OVERDUE -> Triple(R.drawable.ic_tryapps_overdue, if (dark) Color(0xFF42201D) else Color(0xFFFDE7E7), if (dark) Color(0xFFFFA79C) else Color(0xFFB42318))
+        NotificationKind.COMPLETED -> Triple(R.drawable.ic_tryapps_completed, if (dark) Color(0xFF17382D) else Color(0xFFDDF5EA), if (dark) Color(0xFF8FE0B9) else Color(0xFF0F7A4F))
+        NotificationKind.REMINDER -> Triple(R.drawable.ic_tryapps_alarm, PaleBlue, if (dark) Color(0xFF9DB5FF) else Color(0xFF1F4FD1))
     }
     val unreadBackground = if (dark) Color(0xFF182136) else Color(0xFFF5F8FF)
     Row(
-        Modifier.fillMaxWidth().background(if (unread) unreadBackground else MaterialTheme.colorScheme.surface)
+        Modifier.fillMaxWidth().background(if (item.unread) unreadBackground else MaterialTheme.colorScheme.surface)
             .clickable(role = Role.Button, onClick = onClick).padding(horizontal = 16.dp, vertical = 14.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
@@ -1481,12 +1576,12 @@ private fun NotificationRow(task: Task, category: String, unread: Boolean, onCli
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
-                Text(title, Modifier.weight(1f), color = Ink, fontSize = 15.sp, lineHeight = 19.sp, fontWeight = if (unread) FontWeight.Bold else FontWeight.Medium)
-                Text(if (formatTaskDate(task.date) == "Hôm nay") task.time else formatTaskDate(task.date), color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text(item.title, Modifier.weight(1f), color = Ink, fontSize = 15.sp, lineHeight = 19.sp, fontWeight = if (item.unread) FontWeight.Bold else FontWeight.Medium)
+                Text(item.timeLabel, color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
-            Text(summary, color = Muted, fontSize = 14.sp, lineHeight = 20.sp)
+            Text(item.summary, color = Muted, fontSize = 14.sp, lineHeight = 20.sp)
         }
-        if (unread) Box(Modifier.padding(top = 6.dp).size(8.dp).background(Blue, CircleShape).semantics { contentDescription = "Chưa đọc" })
+        if (item.unread) Box(Modifier.padding(top = 6.dp).size(8.dp).background(Blue, CircleShape).semantics { contentDescription = "Chưa đọc" })
     }
 }
 
