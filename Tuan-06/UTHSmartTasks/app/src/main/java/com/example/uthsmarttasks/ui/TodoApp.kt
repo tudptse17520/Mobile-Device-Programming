@@ -51,6 +51,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -83,6 +84,8 @@ import com.example.uthsmarttasks.model.CreateTaskRequest
 import com.example.uthsmarttasks.model.tasksForToday
 import com.example.uthsmarttasks.viewmodel.TaskViewModel
 import com.example.uthsmarttasks.viewmodel.TaskUiState
+import com.example.uthsmarttasks.viewmodel.TaskFormState
+import com.example.uthsmarttasks.viewmodel.taskDateFromToday
 import com.example.uthsmarttasks.viewmodel.NotificationItem
 import com.example.uthsmarttasks.viewmodel.NotificationKind
 import com.example.uthsmarttasks.viewmodel.NotificationViewModel
@@ -156,12 +159,17 @@ fun TodoApp(
     var listFilter by rememberSaveable { mutableStateOf("Tất cả") }
     val go = { next: Page ->
         if (next == Page.DETAIL && page in listOf(Page.HOME.name, Page.LIST.name)) detailReturn = page
-        if (next == Page.ADD) addReturn = page
+        if (next == Page.ADD) {
+            addReturn = page
+            viewModel.openTaskForm()
+        }
+        if (next == Page.EDIT) viewModel.openTaskForm(selectedTask)
         if (next == Page.NOTIFICATIONS) notificationsReturn = page
         if (next == Page.LIST && page != Page.LIST.name) viewModel.loadTasksOnListEntry()
         page = next.name
     }
     BackHandler(enabled = page != Page.HOME.name && page != Page.START.name) {
+        if (page == Page.ADD.name || page == Page.EDIT.name) viewModel.closeTaskForm()
         page = when (Page.valueOf(page)) {
             Page.DETAIL -> detailReturn
             Page.ADD -> addReturn
@@ -270,8 +278,31 @@ fun TodoApp(
                     onProfile = { go(Page.PROFILE) }
                 )
                 Page.LIST -> TaskListScreen(state.tasks, state.loading, { id -> selectedTaskId = id; viewModel.loadTask(id) { page = detailReturn }; go(Page.DETAIL) }, viewModel::toggleDone, filter = listFilter, onFilter = { listFilter = it })
-                Page.ADD -> AddTaskScreen(loading = state.loading, onBack = { page = addReturn }, onSave = { request -> viewModel.createTask(request) { id -> selectedTaskId = id; detailReturn = addReturn; go(Page.DETAIL) } })
-                Page.EDIT -> selectedTask?.let { task -> AddTaskScreen(initialTask = task, loading = state.loading, onBack = { go(Page.DETAIL) }, onSave = { request -> viewModel.updateTask(task, request) { go(Page.DETAIL) } }) } ?: EmptyDetail { go(Page.LIST) }
+                Page.ADD, Page.EDIT -> {
+                    val editing = page == Page.EDIT.name
+                    val form by viewModel.taskForm.collectAsStateWithLifecycle()
+                    if (editing && selectedTask == null) {
+                        EmptyDetail { viewModel.closeTaskForm(); go(Page.LIST) }
+                    } else {
+                        AddTaskScreen(
+                            form = form,
+                            loading = state.loading,
+                            onChange = viewModel::editTaskForm,
+                            onDateShortcut = viewModel::chooseTaskDate,
+                            onBack = {
+                                viewModel.closeTaskForm()
+                                page = if (editing) Page.DETAIL.name else addReturn
+                            },
+                            onSave = {
+                                viewModel.saveTaskForm { id ->
+                                    selectedTaskId = id
+                                    if (!editing) detailReturn = addReturn
+                                    go(Page.DETAIL)
+                                }
+                            }
+                        )
+                    }
+                }
                 Page.DETAIL -> if (selectedTask != null) DetailScreen(
                     task = selectedTask,
                     backLabel = when (Page.valueOf(detailReturn)) {
@@ -849,28 +880,50 @@ private fun DetailValueRow(icon: Int, label: String, value: String) {
 }
 
 @Composable
-private fun AddTaskScreen(initialTask: Task? = null, loading: Boolean = false, onBack: () -> Unit, onSave: (CreateTaskRequest) -> Unit) {
-    var title by rememberSaveable(initialTask?.id) { mutableStateOf(initialTask?.title.orEmpty()) }
-    var note by rememberSaveable(initialTask?.id) { mutableStateOf(initialTask?.note.orEmpty()) }
-    var category by rememberSaveable(initialTask?.id) { mutableStateOf(initialTask?.category ?: "study") }
-    var date by rememberSaveable(initialTask?.id) { mutableStateOf(initialTask?.date ?: SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())) }
-    var time by rememberSaveable(initialTask?.id) { mutableStateOf(initialTask?.time ?: "19:00") }
-    var priority by rememberSaveable(initialTask?.id) { mutableStateOf(initialTask?.priority ?: "medium") }
-    var remind by rememberSaveable(initialTask?.id) { mutableStateOf(initialTask?.remind ?: true) }
-    var error by rememberSaveable { mutableStateOf(false) }
+private fun AddTaskScreen(
+    form: TaskFormState,
+    loading: Boolean,
+    onChange: ((CreateTaskRequest) -> CreateTaskRequest) -> Unit,
+    onDateShortcut: (Int) -> Unit,
+    onBack: () -> Unit,
+    onSave: () -> Unit
+) {
+    val draft = form.draft
+    val creating = form.taskId == null
+    val canSave = form.canSave && !loading
     val context = LocalContext.current
-    val calendar = Calendar.getInstance()
-    runCatching { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).parse(date) }.getOrNull()?.let { calendar.time = it }
-    val dateText = runCatching { SimpleDateFormat("EEEE, dd/MM", Locale.forLanguageTag("vi")).format(SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).parse(date) ?: Date()) }.getOrDefault(date)
+    val parsedDate = runCatching { SimpleDateFormat("yyyy-MM-dd", Locale.US).parse(draft.date) }.getOrNull()
+    val dateText = parsedDate?.let { SimpleDateFormat("EEEE, dd/MM", Locale.forLanguageTag("vi")).format(it) } ?: draft.date
+    val showCalendar: (Boolean) -> Unit = { thisWeek ->
+        val today = Calendar.getInstance()
+        val daysSinceMonday = (today.get(Calendar.DAY_OF_WEEK) + 5) % 7
+        val monday = (today.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, -daysSinceMonday) }
+        val sunday = (monday.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, 6) }
+        val weekDates = taskDateFromToday(-daysSinceMonday)..taskDateFromToday(6 - daysSinceMonday)
+        val calendar = (today.clone() as Calendar).apply {
+            if (parsedDate != null && (!thisWeek || draft.date in weekDates)) {
+                time = parsedDate
+            }
+        }
+        val dialog = DatePickerDialog(context, { _, year, month, day ->
+            val date = String.format(Locale.US, "%04d-%02d-%02d", year, month + 1, day)
+            onChange { it.copy(date = date) }
+        }, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH), calendar.get(Calendar.DAY_OF_MONTH))
+        if (thisWeek) {
+            dialog.datePicker.minDate = monday.timeInMillis
+            dialog.datePicker.maxDate = sunday.timeInMillis
+        }
+        dialog.show()
+    }
     Column(Modifier.fillMaxSize().imePadding().padding(start = 20.dp, end = 20.dp, top = topAfterStatusBar(56.dp))) {
         Box(Modifier.fillMaxWidth().height(44.dp)) {
             TextButton(onClick = onBack, modifier = Modifier.align(Alignment.CenterStart).offset(x = (-12).dp), contentPadding = PaddingValues(0.dp)) {
                 Text("Hủy", color = Blue, fontSize = 16.sp)
             }
-            Text(if (initialTask == null) "Việc mới" else "Sửa việc", Modifier.align(Alignment.Center), fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = Ink)
-            TextButton(enabled = title.isNotBlank() && !loading, onClick = { if (title.isBlank()) error = true else onSave(CreateTaskRequest(title.trim(), note.trim(), category, date, time, priority, remind)) },
+            Text(if (creating) "Việc mới" else "Sửa việc", Modifier.align(Alignment.Center), fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+            TextButton(enabled = canSave, onClick = onSave,
                 modifier = Modifier.align(Alignment.CenterEnd).offset(x = 12.dp), contentPadding = PaddingValues(0.dp)) {
-                Text("Lưu", color = if (title.isNotBlank() && !loading) Blue else Muted, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text("Lưu", color = if (canSave) Blue else Muted, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             }
         }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(top = 12.dp)) {
@@ -878,23 +931,21 @@ private fun AddTaskScreen(initialTask: Task? = null, loading: Boolean = false, o
                 Column {
                     Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("Tên công việc", color = Muted, fontSize = 12.sp, lineHeight = 15.sp)
-                        BasicTextField(title, { title = it; error = false }, modifier = Modifier.fillMaxWidth().heightIn(min = 21.dp), singleLine = true, textStyle = TextStyle(color = Ink, fontFamily = MaterialTheme.typography.bodyMedium.fontFamily, fontSize = 17.sp, fontWeight = FontWeight.Medium), decorationBox = { inner -> Box { if (title.isEmpty()) Text("Ôn chương 4 – Giải thuật", color = Muted, fontSize = 17.sp, lineHeight = 21.sp); inner() } })
+                        BasicTextField(draft.title, { title -> onChange { it.copy(title = title) } }, modifier = Modifier.fillMaxWidth().heightIn(min = 21.dp), singleLine = true, textStyle = TextStyle(color = Ink, fontFamily = MaterialTheme.typography.bodyMedium.fontFamily, fontSize = 17.sp, fontWeight = FontWeight.Medium), decorationBox = { inner -> Box { if (draft.title.isEmpty()) Text("Ví dụ: Ôn chương 4 – Giải thuật", color = Muted, fontSize = 17.sp, lineHeight = 21.sp); inner() } })
                     }
                     HorizontalDivider(color = RowDivider)
                     Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("Ghi chú", color = Muted, fontSize = 12.sp, lineHeight = 15.sp)
-                        BasicTextField(note, { note = it }, modifier = Modifier.fillMaxWidth().heightIn(min = 38.dp), textStyle = MaterialTheme.typography.bodyMedium.copy(color = Ink), decorationBox = { inner -> Box { if (note.isEmpty()) Text("Thêm ghi chú (không bắt buộc)", color = Muted, fontSize = 15.sp, lineHeight = 19.sp); inner() } })
+                        BasicTextField(draft.note, { note -> onChange { it.copy(note = note) } }, modifier = Modifier.fillMaxWidth().heightIn(min = 38.dp), textStyle = MaterialTheme.typography.bodyMedium.copy(color = Ink), decorationBox = { inner -> Box { if (draft.note.isEmpty()) Text("Thêm ghi chú (không bắt buộc)", color = Muted, fontSize = 15.sp, lineHeight = 19.sp); inner() } })
                     }
                 }
             }
-            if (error) Text("Vui lòng nhập tên công việc.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 5.dp))
-
             FormSectionLabel("Nhóm")
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 listOf("study" to "Học tập", "life" to "Cuộc sống").forEach { (value, label) ->
-                    val selected = category == value
+                    val selected = draft.category == value
                     OutlinedButton(
-                        onClick = { category = value }, modifier = Modifier.weight(1f).height(48.dp),
+                        onClick = { onChange { it.copy(category = value) } }, modifier = Modifier.weight(1f).height(48.dp),
                         shape = RoundedCornerShape(14.dp),
                         border = androidx.compose.foundation.BorderStroke(if (selected) 2.dp else 1.dp, if (selected) Blue else Color(0xFFDCDCE0)),
                         colors = ButtonDefaults.outlinedButtonColors(containerColor = if (selected) PaleBlue else MaterialTheme.colorScheme.surface, contentColor = if (selected) Blue else Ink)
@@ -902,16 +953,23 @@ private fun AddTaskScreen(initialTask: Task? = null, loading: Boolean = false, o
                 }
             }
 
-            val timeParts = time.split(":").mapNotNull { it.toIntOrNull() }
+            if (creating) {
+                TaskDateShortcuts(draft.date, dateText, onDateShortcut, showCalendar)
+            }
+
+            val timeParts = draft.time.split(":").mapNotNull { it.toIntOrNull() }
             Spacer(Modifier.height(18.dp))
             Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                 Column {
-                    FormValueRow(R.drawable.ic_figma_calendar, "Ngày", dateText) {
-                        DatePickerDialog(context, { _, year, month, day -> date = String.format(Locale.US, "%04d-%02d-%02d", year, month + 1, day) }, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH), calendar.get(Calendar.DAY_OF_MONTH)).show()
+                    if (!creating) {
+                        FormValueRow(R.drawable.ic_figma_calendar, "Ngày", dateText) { showCalendar(false) }
+                        HorizontalDivider(color = RowDivider)
                     }
-                    HorizontalDivider(color = RowDivider)
-                    FormValueRow(R.drawable.ic_figma_clock, "Giờ", time) {
-                        TimePickerDialog(context, { _, hour, minute -> time = String.format(Locale.US, "%02d:%02d", hour, minute) }, timeParts.getOrElse(0) { 9 }, timeParts.getOrElse(1) { 0 }, true).show()
+                    FormValueRow(R.drawable.ic_figma_clock, "Giờ", draft.time) {
+                        TimePickerDialog(context, { _, hour, minute ->
+                            val time = String.format(Locale.US, "%02d:%02d", hour, minute)
+                            onChange { it.copy(time = time) }
+                        }, timeParts.getOrElse(0) { 9 }, timeParts.getOrElse(1) { 0 }, true).show()
                     }
                     HorizontalDivider(color = RowDivider)
                     Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -920,7 +978,7 @@ private fun AddTaskScreen(initialTask: Task? = null, loading: Boolean = false, o
                             Text("Nhắc tôi", color = Ink, fontSize = 15.sp)
                             Text("Trước 15 phút", color = Muted, style = MaterialTheme.typography.labelSmall)
                         }
-                        SettingsToggle("Nhắc tôi", remind) { remind = it }
+                        SettingsToggle("Nhắc tôi", draft.remind) { remind -> onChange { it.copy(remind = remind) } }
                     }
                 }
             }
@@ -928,17 +986,61 @@ private fun AddTaskScreen(initialTask: Task? = null, loading: Boolean = false, o
             FormSectionLabel("Mức ưu tiên")
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(SurfaceGray).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 listOf("low" to "Thấp", "medium" to "Vừa", "high" to "Cao").forEach { (value, label) ->
-                    val selected = priority == value
+                    val selected = draft.priority == value
                     Box(Modifier.weight(1f).height(36.dp).clip(RoundedCornerShape(9.dp)).background(if (selected) MaterialTheme.colorScheme.surface else Color.Transparent)
-                        .selectable(selected, role = Role.Tab) { priority = value }, contentAlignment = Alignment.Center) {
+                        .selectable(selected, role = Role.Tab) { onChange { it.copy(priority = value) } }, contentAlignment = Alignment.Center) {
                         Text(label, color = if (selected) Ink else Muted, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                     }
                 }
             }
             Spacer(Modifier.height(18.dp))
         }
-        Button(enabled = title.isNotBlank() && !loading, onClick = { if (title.isBlank()) error = true else onSave(CreateTaskRequest(title.trim(), note.trim(), category, date, time, priority, remind)) }, modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 16.dp).height(56.dp), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Blue)) {
-            Text(if (initialTask == null) "Lưu công việc" else "Lưu thay đổi", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+        Button(enabled = canSave, onClick = onSave, modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 16.dp).height(56.dp), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Blue)) {
+            Text(if (creating) "Lưu công việc" else "Lưu thay đổi", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+private fun TaskDateShortcuts(
+    date: String,
+    dateText: String,
+    onChooseDay: (Int) -> Unit,
+    onOpenCalendar: (Boolean) -> Unit
+) {
+    val daysSinceMonday = (Calendar.getInstance().get(Calendar.DAY_OF_WEEK) + 5) % 7
+    val chosen = when (date) {
+        taskDateFromToday(0) -> 0
+        taskDateFromToday(1) -> 1
+        in taskDateFromToday(-daysSinceMonday)..taskDateFromToday(6 - daysSinceMonday) -> 2
+        else -> null
+    }
+    Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("Ngày", Modifier.weight(1f), color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        if (chosen == null || chosen == 2) Text(dateText, color = Muted, fontSize = 13.sp)
+        Box(
+            Modifier.size(44.dp, 32.dp).clickable(role = Role.Button) { onOpenCalendar(false) },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(painterResource(R.drawable.ic_figma_calendar), "Chọn ngày cụ thể", tint = Muted, modifier = Modifier.size(18.dp))
+        }
+    }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf("Hôm nay", "Ngày mai", "Tuần này").forEachIndexed { index, label ->
+            val isSelected = chosen == index
+            OutlinedButton(
+                onClick = { if (index == 2) onOpenCalendar(true) else onChooseDay(index) },
+                modifier = Modifier.weight(1f).height(44.dp).semantics { selected = isSelected },
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 4.dp),
+                border = androidx.compose.foundation.BorderStroke(
+                    if (isSelected) 2.dp else 1.dp, if (isSelected) Blue else Color(0xFFDCDCE0)
+                ),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = if (isSelected) PaleBlue else MaterialTheme.colorScheme.surface,
+                    contentColor = if (isSelected) Blue else Ink
+                )
+            ) { Text(label, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
         }
     }
 }

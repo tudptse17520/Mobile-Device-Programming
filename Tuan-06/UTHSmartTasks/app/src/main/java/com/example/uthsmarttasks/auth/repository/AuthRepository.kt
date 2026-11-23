@@ -25,17 +25,22 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.tasks.await
 
 class AuthRepository(
-    private val auth: FirebaseAuth = FirebaseAuth.getInstance()
+    private val auth: FirebaseAuth? = defaultFirebaseAuth()
 ) {
     val currentUser: FirebaseUser?
-        get() = auth.currentUser
+        get() = auth?.currentUser
 
     // Web client ID (client_type 3) do plugin google-services sinh ra từ google-services.json
     private fun getServerClientId(context: Context): String =
         context.getString(R.string.default_web_client_id)
     suspend fun signInWithGoogle(activityContext: Context): Result<FirebaseUser> {
+        val firebaseAuth = auth
+        val clientId = getServerClientId(activityContext)
+        if (firebaseAuth == null || clientId.isBlank()) {
+            return Result.failure(Exception("Chưa có cấu hình Google Sign-In. Bạn có thể dùng thử với chế độ khách."))
+        }
         return try {
-            val googleOption = GetSignInWithGoogleOption.Builder(getServerClientId(activityContext))
+            val googleOption = GetSignInWithGoogleOption.Builder(clientId)
                 .build()
             val request = GetCredentialRequest.Builder()
                 .addCredentialOption(googleOption)
@@ -51,7 +56,7 @@ class AuthRepository(
             }
             val idToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
             val firebaseCredential = GoogleAuthProvider.getCredential(idToken, null)
-            val user = auth.signInWithCredential(firebaseCredential).await().user
+            val user = firebaseAuth.signInWithCredential(firebaseCredential).await().user
             if (user != null) {
                 Result.success(user)
             } else {
@@ -110,7 +115,7 @@ class AuthRepository(
         }
     }
     suspend fun signOut(context: Context) {
-        auth.signOut()
+        auth?.signOut()
         try {
             CredentialManager.create(context).clearCredentialState(ClearCredentialStateRequest())
         } catch (e: CancellationException) {
@@ -121,7 +126,7 @@ class AuthRepository(
     }
 
     suspend fun updateDisplayName(name: String): Result<FirebaseUser> = runCatching {
-        val user = auth.currentUser ?: error("Vui lòng đăng nhập lại để sửa hồ sơ.")
+        val user = auth?.currentUser ?: error("Vui lòng đăng nhập lại để sửa hồ sơ.")
         user.updateProfile(UserProfileChangeRequest.Builder().setDisplayName(name.trim()).build()).await()
         user
     }
@@ -130,6 +135,13 @@ class AuthRepository(
         const val TAG = "AuthRepository"
     }
 }
+
+internal fun defaultFirebaseAuth(): FirebaseAuth? = try {
+    FirebaseAuth.getInstance()
+} catch (_: IllegalStateException) {
+    null
+}
+
 internal fun firebaseAuthErrorMessage(errorCode: String?): String = when (errorCode) {
     "ERROR_NETWORK_REQUEST_FAILED" ->
         "Không có kết nối mạng. Vui lòng kiểm tra Internet và thử lại."

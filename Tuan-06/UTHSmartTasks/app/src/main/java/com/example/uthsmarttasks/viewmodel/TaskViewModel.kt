@@ -1,6 +1,8 @@
 package com.example.uthsmarttasks.viewmodel
 
 import android.app.Application
+import android.os.Bundle
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.uthsmarttasks.BuildConfig
@@ -17,6 +19,7 @@ import com.example.uthsmarttasks.network.ApiClient
 import com.example.uthsmarttasks.network.CloudTasks
 import com.example.uthsmarttasks.network.SyncDiagnostics
 import com.example.uthsmarttasks.notifications.TaskReminder
+import com.example.uthsmarttasks.auth.repository.defaultFirebaseAuth
 import com.google.android.gms.tasks.Task as FirebaseOperation
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.ListenerRegistration
@@ -51,8 +54,15 @@ data class TaskUiState(
 class TaskViewModel @JvmOverloads constructor(
     application: Application,
     private val repository: TaskRepository = ApiClient.taskRepository,
-    private val offlineDemo: Boolean = BuildConfig.MOCK_API_TOKEN.isBlank()
+    private val offlineDemo: Boolean = BuildConfig.MOCK_API_TOKEN.isBlank(),
+    private val savedState: SavedStateHandle = SavedStateHandle()
 ) : AndroidViewModel(application) {
+    constructor(application: Application, savedState: SavedStateHandle) :
+        this(application, ApiClient.taskRepository, BuildConfig.MOCK_API_TOKEN.isBlank(), savedState)
+
+    private companion object {
+        const val FORM_KEY = "task-form"
+    }
     private val preferences = application.getSharedPreferences("uth_todo_settings", Application.MODE_PRIVATE)
     private val initialTheme = preferences.getString("theme", "light") ?: "light"
     private val _uiState = MutableStateFlow(
@@ -68,6 +78,11 @@ class TaskViewModel @JvmOverloads constructor(
         )
     )
     val uiState = _uiState.asStateFlow()
+    private val _taskForm = MutableStateFlow(
+        savedState.get<Bundle>(FORM_KEY)?.let(TaskFormState::restore) ?: TaskFormState()
+    )
+    val taskForm = _taskForm.asStateFlow()
+    private var formVersion = 0
     private var firebaseAuth: FirebaseAuth? = null
     private var authListener: FirebaseAuth.AuthStateListener? = null
     private var cloud: CloudTasks? = null
@@ -82,10 +97,11 @@ class TaskViewModel @JvmOverloads constructor(
     }
 
     fun enableCloudSync() {
-        if (authListener != null) return
-        val auth = FirebaseAuth.getInstance()
+        if (sourceInitialized) return
+        val auth = defaultFirebaseAuth()
         firebaseAuth = auth
-        switchSource(auth.currentUser?.uid)
+        switchSource(auth?.currentUser?.uid)
+        if (auth == null) return
         authListener = FirebaseAuth.AuthStateListener {
             val uid = it.currentUser?.uid
             if (uid != _uiState.value.cloudUid) switchSource(uid)
@@ -196,6 +212,56 @@ class TaskViewModel @JvmOverloads constructor(
         val current = currentTask(task)
         patch(current, PatchTaskRequest(done = !current.done),
             if (current.done) "Đã đánh dấu chưa xong" else "Tuyệt, đã xong một việc!")
+    }
+
+    fun openTaskForm(task: Task? = null) {
+        formVersion++
+        setTaskForm(TaskFormState.forTask(task))
+    }
+
+    fun closeTaskForm() {
+        formVersion++
+        savedState.remove<Bundle>(FORM_KEY)
+    }
+
+    fun editTaskForm(update: (CreateTaskRequest) -> CreateTaskRequest) {
+        val form = _taskForm.value
+        setTaskForm(form.copy(draft = update(form.draft)))
+    }
+
+    fun chooseTaskDate(daysFromToday: Int) {
+        val date = taskDateFromToday(daysFromToday)
+        editTaskForm { it.copy(date = date) }
+    }
+
+    private fun setTaskForm(form: TaskFormState) {
+        savedState[FORM_KEY] = form.toSavedState()
+        _taskForm.value = form
+    }
+
+    fun saveTaskForm(onSuccess: (Int) -> Unit) {
+        val form = _taskForm.value
+        if (!form.canSave || _uiState.value.loading) return
+        val draft = form.draft
+        val request = draft.copy(title = draft.title.trim(), note = draft.note.trim())
+        val currentFormVersion = formVersion
+        val currentSourceVersion = sourceVersion
+        val onSaved: (Int) -> Unit = { id ->
+            if (formVersion == currentFormVersion && sourceVersion == currentSourceVersion) {
+                closeTaskForm()
+                onSuccess(id)
+            }
+        }
+        if (form.taskId == null) {
+            createTask(request, onSaved)
+        } else {
+            val task = _uiState.value.tasks.firstOrNull { it.id == form.taskId }
+            if (task == null) {
+                _uiState.update { it.copy(message = "Không tìm thấy công việc cần sửa.", messageIsError = true) }
+                return
+            }
+            updateTask(task, request) { onSaved(task.id) }
+        }
     }
 
     fun createTask(request: CreateTaskRequest, onSuccess: (Int) -> Unit = {}) {

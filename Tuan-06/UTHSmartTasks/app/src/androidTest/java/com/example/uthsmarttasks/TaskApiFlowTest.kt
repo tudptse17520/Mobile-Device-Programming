@@ -11,6 +11,11 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.core.view.WindowCompat
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.Espresso.pressBack
+import androidx.test.espresso.assertion.ViewAssertions.matches
+import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
+import androidx.test.espresso.matcher.ViewMatchers.withClassName
 import com.example.uthsmarttasks.auth.ui.AuthViewModel
 import com.example.uthsmarttasks.auth.repository.AuthRepository
 import com.example.uthsmarttasks.model.Subtask
@@ -21,12 +26,14 @@ import com.example.uthsmarttasks.ui.TodoApp
 import com.example.uthsmarttasks.ui.theme.AppTypography
 import com.example.uthsmarttasks.ui.theme.todoColors
 import com.example.uthsmarttasks.viewmodel.TaskViewModel
+import com.example.uthsmarttasks.viewmodel.taskDateFromToday
 import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import org.hamcrest.CoreMatchers.equalTo
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -272,20 +279,31 @@ class TaskApiFlowTest {
             ui.onNodeWithText("0/0 việc").assertExists()
             ui.onNodeWithContentDescription("Thêm mới").performClick()
             ui.onNodeWithText("Lưu").assertIsNotEnabled()
-            ui.onAllNodes(hasSetTextAction())[0].performTextInput("API test create")
+            ui.onNodeWithText("Lưu công việc").assertIsNotEnabled()
+            ui.onNodeWithText("Hôm nay").assertIsSelected()
+            ui.onNodeWithText("Tuần này").performScrollTo().performClick()
+            onView(withClassName(equalTo(android.widget.DatePicker::class.java.name))).check(matches(isDisplayed()))
+            pressBack()
+            ui.onNodeWithText("Ngày mai").performScrollTo().performClick().assertIsSelected()
+            ui.onAllNodes(hasSetTextAction())[0].performTextReplacement("   ")
+            ui.onNodeWithText("Lưu").assertIsNotEnabled()
+            ui.onAllNodes(hasSetTextAction())[0].performTextReplacement("  API test create  ")
             server.enqueue(MockResponse().setResponseCode(400).setBody("""{"message":"Lỗi kiểm thử API."}"""))
             ui.onNodeWithText("Lưu").performClick()
             waitLoaded()
             ui.onNodeWithText("Lỗi kiểm thử API.").assertExists()
             ui.onNodeWithText("Việc mới").assertExists()
             val postError = server.takeRequest()
-            assertEquals(setOf("title","note","category","date","time","priority","remind"),
-                JsonParser.parseString(postError.body.readUtf8()).asJsonObject.keySet())
+            val payload = JsonParser.parseString(postError.body.readUtf8()).asJsonObject
+            assertEquals(setOf("title","note","category","date","time","priority","remind"), payload.keySet())
+            assertEquals("API test create", payload["title"].asString)
+            assertEquals(taskDateFromToday(1), payload["date"].asString)
+            ui.onNodeWithText("Ngày mai").assertIsSelected()
             screenshot("api-form-error")
             ui.onNodeWithText("Đóng").performClick()
 
             server.enqueue(MockResponse().setResponseCode(201).setBody(gson.toJson(sample)).setBodyDelay(1, TimeUnit.SECONDS))
-            ui.onNodeWithText("Lưu").performClick()
+            ui.onNodeWithText("Lưu công việc").performClick()
             ui.onNodeWithText("Lưu").assertIsNotEnabled()
             assertTrue(vm.uiState.value.loading)
             waitLoaded()

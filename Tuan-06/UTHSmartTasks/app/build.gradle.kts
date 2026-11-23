@@ -8,7 +8,8 @@ plugins {
 }
 
 // Cấu hình Firebase được đặt riêng trong thư mục app và không commit.
-if (file("google-services.json").exists()) {
+val firebaseConfigured = file("google-services.json").exists()
+if (firebaseConfigured) {
     apply(plugin = "com.google.gms.google-services")
     apply(plugin = "com.google.firebase.crashlytics")
 }
@@ -31,8 +32,13 @@ android {
         versionCode = 1
         versionName = "1.0"
         buildConfigField("String", "MOCK_API_TOKEN", "\"$apiToken\"")
+        if (!firebaseConfigured) resValue("string", "default_web_client_id", "")
     }
-    buildFeatures { compose = true; buildConfig = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+        resValues = !firebaseConfigured
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
